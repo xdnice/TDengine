@@ -29,7 +29,15 @@ extern int64_t tsPageSize;
 extern int64_t tsOpenMax;
 extern int64_t tsStreamMax;
 extern int32_t tsNumOfCores;
-extern int32_t tsTotalDiskGB;
+extern float   tsTotalLogDirGB;
+extern float   tsTotalTmpDirGB;
+extern float   tsTotalDataDirGB;
+extern float   tsAvailLogDirGB;
+extern float   tsAvailTmpDirGB;
+extern float   tsAvailDataDirGB;
+extern float   tsMinimalLogDirGB;
+extern float   tsMinimalTmpDirGB;
+extern float   tsMinimalDataDirGB;
 extern int32_t tsTotalMemoryMB;
 extern int32_t tsVersion;
 
@@ -129,6 +137,7 @@ extern int   tsHttpCacheSessions;
 extern int   tsHttpSessionExpire;
 extern int   tsHttpMaxThreads;
 extern int   tsHttpEnableCompress;
+extern int   tsTelegrafUseFieldNum;
 extern int   tsAdminRowLimit;
 
 extern char tsMonitorDbName[];
@@ -177,6 +186,7 @@ void tsInitGlobalConfig();
 #define TSDB_CFG_CTYPE_B_LOG 4      // is a log type configuration
 #define TSDB_CFG_CTYPE_B_CLIENT 8   // can be displayed in the client log
 #define TSDB_CFG_CTYPE_B_OPTION 16  // can be configured by taos_options function
+#define TSDB_CFG_CTYPE_B_NOT_PRINT 32
 
 #define TSDB_CFG_CSTATUS_NONE 0     // not configured
 #define TSDB_CFG_CSTATUS_DEFAULT 1  // use system default value

@@ -223,29 +223,74 @@ int taosOpenUDServerSocket(char *ip, short port) {
   return sockFd;
 }
 
+// The callback functions MUST free the param pass to it after finishing use it.
 int taosInitTimer(void *(*callback)(void *), int ms) {
   /********************************************************
    * Create SIGALRM loop thread
    ********************************************************/
-  pthread_t      thread;
+  pthread_t thread;
   pthread_attr_t tattr;
   if (pthread_attr_init(&tattr)) {
-    return -1;
+      return -1;
   }
 
   if (pthread_attr_setdetachstate(&tattr, PTHREAD_CREATE_DETACHED)) {
-    return -1;
+      return -1;
   }
 
-  int *tms = (int *)malloc(sizeof(int));
+  int *tms = (int *) malloc(sizeof(int));
   *tms = ms;
-  if (pthread_create(&thread, &tattr, callback, (void *)tms)) {
-    return -1;
+  if (pthread_create(&thread, &tattr, callback, (void *) tms)) {
+      free(tms);
+      return -1;
   }
 
   if (pthread_attr_destroy(&tattr)) {
-    return -1;
+      return -1;
   }
 
   return 0;
+}
+
+ssize_t tsendfile(int dfd, int sfd, off_t *offset, size_t size) {
+  size_t  leftbytes = size;
+  ssize_t sentbytes;
+
+  while (leftbytes > 0) {
+    // TODO : Think to check if file is larger than 1GB
+    if (leftbytes > 1000000000) leftbytes = 1000000000;
+    sentbytes = sendfile(dfd, sfd, offset, leftbytes);
+    if (sentbytes == -1) {
+      if (errno == EINTR) {
+        continue;
+      }
+      else {
+        return -1;
+      }
+    }
+
+    leftbytes -= sentbytes;
+  }
+
+  return size;
+}
+
+ssize_t twrite(int fd, void *buf, size_t n) {
+  size_t nleft = n; 
+  ssize_t nwritten = 0;
+  char *tbuf = (char *)buf;
+
+  while (nleft > 0) {
+    nwritten = write(fd, (void *)tbuf, nleft);
+    if (nwritten < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      return -1;
+    }
+    nleft -= nwritten;
+    tbuf += nwritten;
+  }
+
+  return n;
 }

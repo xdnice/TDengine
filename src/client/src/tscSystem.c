@@ -47,11 +47,17 @@ int     slaveIndex;
 void *  tscTmr;
 void *  tscQhandle;
 void *  tscConnCache;
+void *  tscCheckDiskUsageTmr;
 int     tsInsertHeadSize;
 
 extern int            tscEmbedded;
 int                   tscNumOfThreads;
 static pthread_once_t tscinit = PTHREAD_ONCE_INIT;
+
+void tscCheckDiskUsage(void *para, void *unused) {
+  taosGetDisk();
+  taosTmrReset(tscCheckDiskUsage, 1000, NULL, tscTmr, &tscCheckDiskUsageTmr);
+}
 
 void taos_init_imp() {
   char        temp[128];
@@ -81,6 +87,7 @@ void taos_init_imp() {
 
     tsReadGlobalConfig();
     tsPrintGlobalConfig();
+    taosTmrReset(tscCheckDiskUsage, 10, NULL, tscTmr, &tscCheckDiskUsageTmr);
 
     tscTrace("starting to initialize TAOS client ...");
     tscTrace("Local IP address is:%s", tsLocalIp);
@@ -110,7 +117,7 @@ void taos_init_imp() {
   rpcInit.numOfChanns = tscNumOfThreads;
   rpcInit.sessionsPerChann = tsMaxVnodeConnections / tscNumOfThreads;
   rpcInit.idMgmt = TAOS_ID_FREE;
-  rpcInit.noFree = 1;
+  rpcInit.noFree = 0;
   rpcInit.connType = TAOS_CONN_UDP;
   rpcInit.qhandle = tscQhandle;
   pVnodeConn = taosOpenRpc(&rpcInit);
@@ -131,7 +138,7 @@ void taos_init_imp() {
   rpcInit.numOfChanns = 1;
   rpcInit.sessionsPerChann = tsMaxMgmtConnections;
   rpcInit.idMgmt = TAOS_ID_FREE;
-  rpcInit.noFree = 1;
+  rpcInit.noFree = 0;
   rpcInit.connType = TAOS_CONN_UDP;
   rpcInit.qhandle = tscQhandle;
   pTscMgmtConn = taosOpenRpc(&rpcInit);

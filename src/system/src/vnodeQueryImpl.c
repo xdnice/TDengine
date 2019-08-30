@@ -642,14 +642,19 @@ static int32_t loadDataBlockIntoMem(SCompBlock *pBlock, SField **pField, SQueryR
 
   int32_t ret = 0;
 
-  /* the first round always be 1, the secondary round is determined by queried
-   * function */
+  // the first round always be 1, the secondary round is determined by queried function
   int32_t round = pRuntimeEnv->scanFlag;
 
   while (j < pBlock->numOfCols && i < pQuery->numOfCols) {
     if ((*pField)[j].colId < pQuery->colList[i].data.colId) {
       ++j;
     } else if ((*pField)[j].colId == pQuery->colList[i].data.colId) {
+      // add additional check for data type
+      if ((*pField)[j].type != pQuery->colList[i].data.type) {
+        ret = TSDB_CODE_INVALID_QUERY_MSG;
+        break;
+      }
+
       /*
        * during supplementary scan:
        * 1. primary ts column (always loaded)
@@ -1730,6 +1735,17 @@ static int64_t getOldestKey(int32_t numOfFiles, int64_t fileId, SVnodeCfg *pCfg)
 
 bool isQueryKilled(SQuery *pQuery) {
   SQInfo *pQInfo = (SQInfo *)GET_QINFO_ADDR(pQuery);
+
+  /*
+   * check if the queried meter is going to be deleted.
+   * if it will be deleted soon, stop current query ASAP.
+   */
+  SMeterObj* pMeterObj = pQInfo->pObj;
+  if (vnodeIsMeterState(pMeterObj, TSDB_METER_STATE_DELETING)) {
+    pQInfo->killed = 1;
+    return true;
+  }
+
   return (pQInfo->killed == 1);
 }
 
@@ -1908,13 +1924,12 @@ static bool cacheBoundaryCheck(SQuery *pQuery, SMeterObj *pMeterObj) {
   TSKEY min, max;
   getQueryRange(pQuery, &min, &max);
 
-  // the query time range is earlier than the first element in cache. abort
-  if (max < keyFirst) {
-    setQueryStatus(pQuery, QUERY_COMPLETED);
-    return false;
-  }
-
-  if (min > keyLast) {
+  /*
+   * The query time range is earlier than the first element or later than the last elements in cache.
+   * If the query window happens to overlap with the time range of disk files but not data in cache,
+   * the flag needs to be cleared. Otherwise, this flag will cause error in following processing.
+   */
+  if (max < keyFirst || min > keyLast) {
     setQueryStatus(pQuery, QUERY_NO_DATA_TO_CHECK);
     return false;
   }
@@ -2061,6 +2076,8 @@ void vnodeCheckIfDataExists(SQueryRuntimeEnv *pRuntimeEnv, SMeterObj *pMeterObj,
 
   *dataInCache = hasDataInCache(pRuntimeEnv, pMeterObj);
   *dataInDisk = hasDataInDisk(pQuery, pMeterObj);
+
+  setQueryStatus(pQuery, QUERY_NOT_COMPLETED);
 }
 
 static void doGetAlignedIntervalQueryRangeImpl(SQuery *pQuery, int64_t qualifiedKey, int64_t keyFirst, int64_t keyLast,
@@ -2645,7 +2662,7 @@ static void vnodeOpenAllFiles(SQInfo *pQInfo, int32_t vnodeId) {
 
     int32_t firstFid = pVnode->fileId - pVnode->numOfFiles + 1;
     if (fid > pVnode->fileId || fid < firstFid) {
-      dError("QInfo:%p error data file:%s in vid:%d, fid:%d, fid range:%d-%d", pQInfo, pEntry->d_name, vnodeId,
+      dError("QInfo:%p error data file:%s in vid:%d, fid:%d, fid range:%d-%d", pQInfo, pEntry->d_name, vnodeId, fid,
              firstFid, pVnode->fileId);
       continue;
     }
@@ -2674,23 +2691,75 @@ static void vnodeOpenAllFiles(SQInfo *pQInfo, int32_t vnodeId) {
   qsort(pRuntimeEnv->pHeaderFiles, (size_t)pRuntimeEnv->numOfFiles, sizeof(SQueryFileInfo), file_order_comparator);
 }
 
-static void updateOffsetVal(SQueryRuntimeEnv *pRuntimeEnv, void *pBlock) {
+static void updateOffsetVal(SQueryRuntimeEnv *pRuntimeEnv, SBlockInfo* pBlockInfo, void *pBlock) {
   SQuery *pQuery = pRuntimeEnv->pQuery;
 
+  int32_t newPos = pQuery->pos;
   if (QUERY_IS_ASC_QUERY(pQuery)) {
-    pQuery->pos += pQuery->limit.offset;
+    if (newPos + pQuery->limit.offset > pBlockInfo->size) {
+      newPos = pBlockInfo->size - 1;
+    } else {
+      newPos += pQuery->limit.offset;
+    }
   } else {
-    pQuery->pos -= pQuery->limit.offset;
+    if (newPos < pQuery->limit.offset) {
+      newPos = 0;
+    } else {
+      newPos -= pQuery->limit.offset;
+    }
   }
 
+  TSKEY newKey = 0;
   if (IS_DISK_DATA_BLOCK(pQuery)) {
-    pQuery->skey = getTimestampInDiskBlock(pRuntimeEnv, pQuery->pos);
+    newKey = getTimestampInDiskBlock(pRuntimeEnv, newPos);
   } else {
-    pQuery->skey = getTimestampInCacheBlock(pBlock, pQuery->pos);
+    newKey = getTimestampInCacheBlock(pBlock, newPos);
   }
 
-  pQuery->lastKey = pQuery->skey;
-  pQuery->limit.offset = 0;
+  /*
+   *  The actually qualified points that can be skipped needs to be calculated if query is
+   *  done in current data block
+   */
+  if ((newKey > pQuery->ekey && QUERY_IS_ASC_QUERY(pQuery)) ||
+      (newKey < pQuery->ekey && !QUERY_IS_ASC_QUERY(pQuery))) {
+    setQueryStatus(pQuery, QUERY_COMPLETED);
+
+    // update the pQuery->limit.offset value, and pQuery->pos value
+    TSKEY* keys = NULL;
+    if (IS_DISK_DATA_BLOCK(pQuery)) {
+      keys = (TSKEY *) pRuntimeEnv->primaryColBuffer->data;
+    } else {
+      keys = (TSKEY *) (((SCacheBlock *)pBlock)->offset[0]);
+    }
+
+    int32_t i = 0;
+    if (QUERY_IS_ASC_QUERY(pQuery)) {
+      for(i = pQuery->pos; i < pBlockInfo->size && pQuery->limit.offset > 0; ++i) {
+        if (keys[i] <= pQuery->ekey) {
+          pQuery->limit.offset -= 1;
+        } else {
+          break;
+        }
+      }
+    } else {
+      for(i = pQuery->pos; i >= 0 && pQuery->limit.offset > 0; --i) {
+        if (keys[i] >= pQuery->ekey) {
+          pQuery->limit.offset -= 1;
+        } else {
+          break;
+        }
+      }
+    }
+
+    pQuery->pos = i;
+  } else {
+    pQuery->skey = newKey;
+    pQuery->lastKey = pQuery->skey;
+
+    // update the offset value
+    pQuery->limit.offset -= abs(newPos - pQuery->pos);
+    pQuery->pos = newPos;
+  }
 }
 
 // todo ignore the avg/sum/min/max/count/stddev/top/bottom functions, of which
@@ -2805,8 +2874,9 @@ static int32_t doSkipDataBlock(SQueryRuntimeEnv *pRuntimeEnv) {
 
     int32_t maxReads = (QUERY_IS_ASC_QUERY(pQuery)) ? blockInfo.size - pQuery->pos : pQuery->pos + 1;
 
-    if (pQuery->limit.offset < maxReads) {  // start position in current block
-      updateOffsetVal(pRuntimeEnv, pBlock);
+    if (pQuery->limit.offset < maxReads  || (pQuery->ekey <= blockInfo.keyLast && QUERY_IS_ASC_QUERY(pQuery)) ||
+        (pQuery->ekey >= blockInfo.keyFirst && !QUERY_IS_ASC_QUERY(pQuery))) {  // start position in current block
+      updateOffsetVal(pRuntimeEnv, &blockInfo, pBlock);
       break;
     } else {
       pQuery->limit.offset -= maxReads;
@@ -2832,8 +2902,9 @@ void forwardQueryStartPosition(SQueryRuntimeEnv *pRuntimeEnv) {
   SBlockInfo blockInfo = getBlockBasicInfo(pBlock, blockType);
   int32_t    maxReads = (QUERY_IS_ASC_QUERY(pQuery)) ? blockInfo.size - pQuery->pos : pQuery->pos + 1;
 
-  if (pQuery->limit.offset < maxReads) {  // start position in current block
-    updateOffsetVal(pRuntimeEnv, pBlock);
+  if (pQuery->limit.offset < maxReads  || (pQuery->ekey <= blockInfo.keyLast && QUERY_IS_ASC_QUERY(pQuery)) ||
+      (pQuery->ekey >= blockInfo.keyFirst && !QUERY_IS_ASC_QUERY(pQuery))) {  // start position in current block
+    updateOffsetVal(pRuntimeEnv, &blockInfo, pBlock);
   } else {
     pQuery->limit.offset -= maxReads;
     doSkipDataBlock(pRuntimeEnv);

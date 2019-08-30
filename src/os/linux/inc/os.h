@@ -42,6 +42,8 @@
 #include <stdint.h>
 #include <pthread.h>
 #include <stdbool.h>
+#include <limits.h>
+#include <sys/sendfile.h>
 
 bool taosCheckPthreadValid(pthread_t thread);
 

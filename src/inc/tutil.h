@@ -180,12 +180,11 @@ int32_t strdequote(char *src);
 
 void strtrim(char *src);
 
-char *strnchr(char *haystack, char needle, int32_t len);
-char *strnchrNoquote(char *haystack, char needle, int32_t len);  
+char *strnchr(char *haystack, char needle, int32_t len, bool skipquote);
 
 char **strsplit(char *src, const char *delim, int32_t *num);
 
-void strtolower(char *src, char *dst);
+char* strtolower(char *dst, const char *src);
 
 int64_t strnatoi(char *num, int32_t len);
 
@@ -235,6 +234,7 @@ int32_t __sync_val_compare_and_swap_32(int32_t *ptr, int32_t oldval, int32_t new
 int32_t __sync_add_and_fetch_32(int32_t *ptr, int32_t val);
 int64_t __sync_val_compare_and_swap_64(int64_t *ptr, int64_t oldval, int64_t newval);
 int64_t __sync_add_and_fetch_64(int64_t *ptr, int64_t val);
+#define twrite write
 #ifndef PATH_MAX
 #define PATH_MAX 256
 #endif
@@ -243,6 +243,8 @@ int64_t __sync_add_and_fetch_64(int64_t *ptr, int64_t val);
 #define __sync_val_compare_and_swap_32 __sync_val_compare_and_swap
 #define __sync_add_and_fetch_64 __sync_add_and_fetch
 #define __sync_add_and_fetch_32 __sync_add_and_fetch
+ssize_t tsendfile(int dfd, int sfd, off_t *offset, size_t size);
+ssize_t twrite(int fd, void *buf, size_t n);
 #endif
 
 #ifdef __cplusplus

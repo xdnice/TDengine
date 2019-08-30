@@ -118,6 +118,7 @@ typedef struct rpc_server {
 int taosDebugFlag = 131;
 int tsRpcTimer = 300;
 int tsRpcMaxTime = 600;  // seconds;
+int tsRpcProgressTime = 10;  // milliseocnds
 
 // not configurable
 int tsRpcMaxRetry;
@@ -168,7 +169,7 @@ char *taosBuildReqHeader(void *param, char type, char *msg) {
   pHeader->sourceId = pConn->ownId;
   pHeader->destId = pConn->peerId;
   pHeader->port = 0;
-  pHeader->uid = (uint32_t)pConn;
+  pHeader->uid = (uint32_t)pConn + (uint32_t)getpid();
 
   memcpy(pHeader->meterId, pConn->meterId, tListLen(pHeader->meterId));
 
@@ -199,7 +200,7 @@ char *taosBuildReqMsgWithSize(void *param, char type, int size) {
 
   pHeader->sourceId = pConn->ownId;
   pHeader->destId = pConn->peerId;
-  pHeader->uid = (uint32_t)pConn;
+  pHeader->uid = (uint32_t)pConn + (uint32_t)getpid();
   memcpy(pHeader->meterId, pConn->meterId, tListLen(pHeader->meterId));
 
   return (char *)pHeader->content;
@@ -294,7 +295,7 @@ int taosSendQuickRsp(void *thandle, char rsptype, char code) {
 void *taosOpenRpc(SRpcInit *pRpc) {
   STaosRpc *pServer;
 
-  tsRpcMaxRetry = tsRpcMaxTime * 1000 / tsRpcTimer;
+  tsRpcMaxRetry = tsRpcMaxTime * 1000 / tsRpcProgressTime;
   tsRpcHeadSize = sizeof(STaosHeader) + sizeof(SMsgNode);
 
   pServer = (STaosRpc *)malloc(sizeof(STaosRpc));
@@ -896,7 +897,7 @@ int taosProcessMsgHeader(STaosHeader *pHeader, SRpcConn **ppConn, STaosRpc *pSer
         tTrace("%s cid:%d sid:%d id:%s, peer is still processing the transaction, pConn:%p",
                pServer->label, chann, sid, pHeader->meterId, pConn);
         pConn->tretry++;
-        taosTmrReset(taosProcessTaosTimer, tsRpcTimer, pConn, pChann->tmrCtrl, &pConn->pTimer);
+        taosTmrReset(taosProcessTaosTimer, tsRpcProgressTime, pConn, pChann->tmrCtrl, &pConn->pTimer);
         code = TSDB_CODE_ALREADY_PROCESSED;
         goto _exit;
       } else {
@@ -1217,6 +1218,7 @@ int taosReSendRspToPeer(SRpcConn *pConn) {
 void taosProcessTaosTimer(void *param, void *tmrId) {
   STaosHeader *pHeader = NULL;
   SRpcConn *   pConn = (SRpcConn *)param;
+  int          msgLen;
 
   if (pConn->signature != param) {
     tError("pConn Signature:0x%x, pConn:0x%x not matched", pConn->signature, param);
@@ -1252,6 +1254,7 @@ void taosProcessTaosTimer(void *param, void *tmrId) {
       if (pConn->pMsgNode && pConn->pMsgNode->msgLen > 0) {
         pHeader = (STaosHeader *)((char *)pConn->pMsgNode + sizeof(SMsgNode));
         pHeader->destId = pConn->peerId;
+        msgLen = pConn->pMsgNode->msgLen;
         if (pConn->spi) {
           STaosDigest *pDigest = (STaosDigest *)(((char *)pHeader) + pConn->pMsgNode->msgLen - sizeof(STaosDigest));
           pDigest->timeStamp = htonl(taosGetTimestampSec());
@@ -1279,8 +1282,7 @@ void taosProcessTaosTimer(void *param, void *tmrId) {
   pthread_mutex_unlock(&pChann->mutex);
 
   if (pHeader) {
-    (*taosSendData[pServer->type])(pConn->peerIp, pConn->peerPort, (char *)pHeader, pConn->pMsgNode->msgLen,
-                                   pConn->chandle);
+    (*taosSendData[pServer->type])(pConn->peerIp, pConn->peerPort, (char *)pHeader, msgLen, pConn->chandle);
     taosTmrReset(taosProcessTaosTimer, tsRpcTimer, pConn, pChann->tmrCtrl, &pConn->pTimer);
   }
 }
